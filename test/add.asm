@@ -28,4 +28,4 @@ M=0
 
 (END)
     @sum
-    D=M   // End of program infinite loo
+    D=M   // store sum in the D Register

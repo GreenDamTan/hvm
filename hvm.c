@@ -1,21 +1,29 @@
-/*
- * hvm.c
- */
-
 #include <getopt.h>
 #include <memory.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <assert.h>
+#include <sys/stat.h>
+#include <stdarg.h>
 #include "hopcodes.h"
-#include "utils.h"
 
 #define INVALID (-1)
-#define P_OFF 0x8 /* program offset */
 
-#define ROM_SIZE 32768 /* 32KB */
-#define RAM_SIZE 16384 /* 16KB */
+/* program offset */
+#define P_OFF 0x8
+
+/* 32KB */
+#define ROM_SIZE 32768
+/* 16KB */
+#define RAM_SIZE 16384
+
+#define emitComp(instr) (uint16_t) (((instr) & 0xFFC0) >> 6)
+#define emitDest(instr) (uint8_t) (((instr) & 0x38) >> 3)
+#define emitJmp(instr) (uint8_t) ((instr) & 0x07)
+
+/* read byte MSB */
+#define read_msb(byt) (((byt) << 8)|((byt) >> 8))
 
 typedef struct _HVMData {
     uint16_t comp:10;
@@ -44,6 +52,9 @@ int running = 1;
 /* Initialize VM */
 static void vm_init(char *);
 
+static void hvm_error(const char *, ...);
+static int fd_isreg(const char *);
+
 /* VM State: Fetch, Decode, Execute */
 static uint16_t fetch(HVMData *);
 static void decode(uint16_t, HVMData *);
@@ -63,12 +74,12 @@ int main(int argc, char *argv[]) {
                 printf("%s\n", usage);
                 break;
             default: /* '?' */
-                hvm_error("Usage: %s [file.hex]\n", Error, argv[0]);
+                hvm_error("Usage: %s [file.hex]\n", argv[0]);
         }
     }
 
     if (argv[optind] == NULL || strlen(argv[optind]) == 0) {
-        hvm_error("error: %s: No such file or directory\n", Fatal, argv[optind]);
+        hvm_error("error: %s: No such file or directory\n", argv[optind]);
     }
 
     vm_init(argv[optind]);
@@ -95,6 +106,26 @@ int main(int argc, char *argv[]) {
     snapshot(&hdt);
 }
 
+void hvm_error(const char *fmt, ...) {
+    va_list args;
+
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+
+int fd_isreg(const char *filename) {
+    struct stat st;
+
+    if (stat(filename, &st))
+        return -1;
+
+    return S_ISREG(st.st_mode);
+}
+
+
 static void snapshot(HVMData *hdt) {
     char *msg = " _   ___      ____  __   \n"
                 "| | | |\\ \\   / |  \\/  |  \n"
@@ -113,7 +144,7 @@ static void snapshot(HVMData *hdt) {
                 "*           *            |  PC [%d]     \n";
 
     char *memories = "_________________________\n"
-                "|  %x             %d     \n";
+                     "|  %x             %d     \n";
     printf(msg, hdt->A_REG, hdt->D_REG, hdt->pc);
     for (int i = 0; ROM[i] ^ 0xffff; ++i) {
         printf(memories, ROM[i], RAM[i]);
@@ -123,17 +154,15 @@ static void snapshot(HVMData *hdt) {
 
 
 static void vm_init(char *arg) {
-    uint16_t buff;
+    uint16_t instr;
     int ind = 0;
 
     FILE *hexfp = NULL;
 
-    if (fd_isreg(arg) > 0) {
-        hexfp = hvm_fopen(arg, "rb");
-    } else {
-        hvm_error("error: %s: No such file or directory\n", Fatal, arg);
-    }
-
+    if (fd_isreg(arg) > 0)
+        hexfp = fopen(arg, "rb");
+    else
+        hvm_error("error: %s: No such file or directory\n", arg);
 
     assert(hexfp != NULL);
 
@@ -142,12 +171,13 @@ static void vm_init(char *arg) {
 
     // jump program offset
     fseek(hexfp, P_OFF, SEEK_SET);
-    while (fread(&buff, sizeof(buff), 1, hexfp) != 0) {
-        ROM[ind++] = read_msb(buff);
+    while (fread(&instr, sizeof(instr), 1, hexfp) != 0) {
+        ROM[ind++] = read_msb(instr);
     }
+
     // end-of-program signature
     ROM[ind] = (uint16_t) EOF;
-    hvm_fclose(hexfp);
+    fclose(hexfp);
 }
 
 static uint16_t fetch(HVMData *hdt) {
@@ -161,10 +191,10 @@ static void decode(uint16_t instr, HVMData *hdt) {
         hdt->A_REG = instr;
         return;
     }
-    // extract comp,dest,jmp parts of instr
-    hdt->comp = (uint16_t) ((instr & 0xFFC0) >> 6);     // 1111111111000000
-    hdt->dest = (uint8_t) ((instr & 0x38) >> 3);        // 0000000000111000
-    hdt->jmp = (uint8_t) (instr & 0x07);                // 0000000000000111
+
+    hdt->comp = emitComp(instr);    // 1111111111000000
+    hdt->dest = emitDest(instr);    // 0000000000111000
+    hdt->jmp = emitJmp(instr);      // 0000000000000111
 
     // turn machine state execute
     hdt->state = hvm_execute;
